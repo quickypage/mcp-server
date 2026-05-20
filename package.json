@@ -1,0 +1,49 @@
+{
+  "name": "@quickypage/mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for Quicky.Page — instant publishing for AI-generated web content. Lets AI agents publish a shareable web page from a single tool call.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "publishing",
+    "quickypage",
+    "claude",
+    "cursor"
+  ],
+  "license": "MIT",
+  "author": "Quicky.Page",
+  "homepage": "https://quicky.page",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/quickypage/mcp-server"
+  },
+  "bugs": {
+    "url": "https://github.com/quickypage/mcp-server/issues"
+  },
+  "type": "module",
+  "main": "./dist/server.js",
+  "bin": {
+    "quickypage-mcp-server": "./dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/server.js",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
