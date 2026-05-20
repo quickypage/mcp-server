@@ -1,7 +1,7 @@
 {
   "name": "@quickypage/mcp-server",
-  "version": "0.1.0",
-  "description": "MCP server for Quicky.Page — instant publishing for AI-generated web content. Lets AI agents publish a shareable web page from a single tool call.",
+  "version": "0.2.0",
+  "description": "MCP server for Quicky.Page — instant publishing for AI-generated web content, including uploaded images.",
   "keywords": [
     "mcp",
     "model-context-protocol",
