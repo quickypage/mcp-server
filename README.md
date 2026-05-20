@@ -4,9 +4,22 @@ An [MCP](https://modelcontextprotocol.io) server for [Quicky.Page](https://quick
 
 Lets any MCP-compatible AI client (Claude Desktop, Cursor, custom orchestrators) publish a shareable web page. Quicky.Page is the publishing primitive for AI-generated web artifacts: a single shareable web object, NOT a website builder, NOT a CMS, NOT a deployment platform.
 
-## Status
+## Install
 
-This package is published to GitHub and is not published to npm yet. Run it from source for now.
+Add this server to Claude Desktop or Cursor with `npx`:
+
+```json
+{
+  "mcpServers": {
+    "quickypage": {
+      "command": "npx",
+      "args": ["-y", "@quickypage/mcp-server"]
+    }
+  }
+}
+```
+
+Restart your MCP client after editing the config.
 
 ## Tools
 
@@ -57,7 +70,7 @@ npm run build
 node dist/server.js
 ```
 
-Point Claude Desktop or Cursor at the compiled `dist/server.js`:
+For local development, point Claude Desktop or Cursor at the compiled `dist/server.js`:
 
 ```json
 {
@@ -78,8 +91,8 @@ Set `QUICKYPAGE_BASE_URL` to point at a non-production deployment:
 {
   "mcpServers": {
     "quickypage": {
-      "command": "node",
-      "args": ["/absolute/path/to/quickypage-mcp-server/dist/server.js"],
+      "command": "npx",
+      "args": ["-y", "@quickypage/mcp-server"],
       "env": { "QUICKYPAGE_BASE_URL": "http://localhost:3000" }
     }
   }

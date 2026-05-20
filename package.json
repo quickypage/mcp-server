@@ -16,7 +16,7 @@
   "homepage": "https://quicky.page",
   "repository": {
     "type": "git",
-    "url": "https://github.com/quickypage/mcp-server"
+    "url": "git+https://github.com/quickypage/mcp-server.git"
   },
   "bugs": {
     "url": "https://github.com/quickypage/mcp-server/issues"
@@ -24,7 +24,7 @@
   "type": "module",
   "main": "./dist/server.js",
   "bin": {
-    "quickypage-mcp-server": "./dist/server.js"
+    "quickypage-mcp-server": "dist/server.js"
   },
   "files": [
     "dist",
