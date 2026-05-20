@@ -17,7 +17,7 @@ import { z } from "zod";
 // server, so the words here are part of the strategy, not flavor text.
 
 const PACKAGE_NAME = "@quickypage/mcp-server";
-const PACKAGE_VERSION = "0.2.0";
+const PACKAGE_VERSION = "0.2.1";
 
 // Endpoint configuration. Defaults to production; override with env when
 // pointing at a staging/preview deployment or a local Next.js dev server.
@@ -41,6 +41,10 @@ const USER_AGENT = `${PACKAGE_NAME}/${PACKAGE_VERSION}`;
 const PREMIUM_TOKEN = process.env.QUICKYPAGE_PREMIUM_TOKEN ?? "";
 
 const MAX_UPLOAD_BYTES = 7 * 1024 * 1024;
+const MAX_BASE64_IMAGE_CHARS = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4;
+const API_TIMEOUT_MS = 15_000;
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 30_000;
+const UPLOAD_PUT_TIMEOUT_MS = 45_000;
 const ALLOWED_IMAGE_MIMES = {
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -217,6 +221,13 @@ class QuickyPageApiError extends Error {
   }
 }
 
+class QuickyPageTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "QuickyPageTimeoutError";
+  }
+}
+
 // Build the outbound header bag. The premium token is attached
 // unconditionally when configured so every endpoint that gates on it
 // (publish, page PATCH) sees the same caller principal. The header is
@@ -230,12 +241,41 @@ function outboundHeaders(extra?: Record<string, string>): Record<string, string>
   return headers;
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method: "POST",
-    headers: outboundHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify(body),
-  });
+function timeoutSignal(ms: number): AbortSignal {
+  return AbortSignal.timeout(ms);
+}
+
+function isTimeoutError(err: unknown): boolean {
+  return (
+    err instanceof QuickyPageTimeoutError ||
+    (err instanceof DOMException &&
+      (err.name === "TimeoutError" || err.name === "AbortError")) ||
+    (err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError"))
+  );
+}
+
+async function postJson<T>(
+  path: string,
+  body: unknown,
+  timeoutMs = API_TIMEOUT_MS,
+): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      method: "POST",
+      headers: outboundHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify(body),
+      signal: timeoutSignal(timeoutMs),
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new QuickyPageTimeoutError(
+        `Timed out after ${Math.round(timeoutMs / 1000)}s calling ${path}.`,
+      );
+    }
+    throw err;
+  }
   const text = await res.text();
   if (!res.ok) {
     // The HTTP API's error envelope is `{ error: string }`. Extract that
@@ -253,10 +293,21 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: outboundHeaders(),
-  });
+async function getJson<T>(path: string, timeoutMs = API_TIMEOUT_MS): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      headers: outboundHeaders(),
+      signal: timeoutSignal(timeoutMs),
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new QuickyPageTimeoutError(
+        `Timed out after ${Math.round(timeoutMs / 1000)}s calling ${path}.`,
+      );
+    }
+    throw err;
+  }
   const text = await res.text();
   if (!res.ok) {
     let detail = text.slice(0, 500);
@@ -339,10 +390,22 @@ function sniffImageMime(bytes: Uint8Array): AllowedImageMime | null {
 
 function decodeBase64Image(input: string): Uint8Array {
   const trimmed = input.trim();
-  const base64 = trimmed.startsWith("data:")
-    ? (trimmed.match(/^data:[^;]+;base64,(.+)$/s)?.[1] ?? "")
-    : trimmed;
+  const base64 = (() => {
+    if (!trimmed.startsWith("data:")) return trimmed;
+    const marker = ";base64,";
+    const markerIndex = trimmed.indexOf(marker);
+    if (markerIndex === -1) return "";
+    return trimmed.slice(markerIndex + marker.length);
+  })();
   if (!base64) throw new Error("Image data is empty.");
+  const compactLength = base64.replace(/\s/g, "").length;
+  if (compactLength > MAX_BASE64_IMAGE_CHARS) {
+    throw new Error(
+      `Image data is too large before upload. Max ${Math.floor(
+        MAX_UPLOAD_BYTES / 1024 / 1024,
+      )} MB decoded; use a smaller image or provide a hosted image URL.`,
+    );
+  }
   if (!/^[A-Za-z0-9+/=\s_-]+$/.test(base64)) {
     throw new Error("Image data must be base64 encoded.");
   }
@@ -352,20 +415,132 @@ function decodeBase64Image(input: string): Uint8Array {
   return bytes;
 }
 
+function assertImageSize(bytes: Uint8Array): void {
+  if (bytes.byteLength <= MAX_UPLOAD_BYTES) return;
+  throw new Error(
+    `Image is too large. Max ${Math.floor(
+      MAX_UPLOAD_BYTES / 1024 / 1024,
+    )} MB; use a smaller image or provide a hosted image URL.`,
+  );
+}
+
+async function readImageFile(path: string): Promise<Uint8Array> {
+  const trimmed = path.trim();
+  if (!trimmed) throw new Error("filePath is empty.");
+  const { stat, readFile } = await import("node:fs/promises");
+  const info = await stat(trimmed);
+  if (!info.isFile()) throw new Error("filePath must point to a file.");
+  if (info.size > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `Image file is too large. Max ${Math.floor(
+        MAX_UPLOAD_BYTES / 1024 / 1024,
+      )} MB; use a smaller image or provide a hosted image URL.`,
+    );
+  }
+  return readFile(trimmed);
+}
+
+async function downloadImageUrl(sourceUrl: string): Promise<Uint8Array> {
+  let parsed: URL;
+  try {
+    parsed = new URL(sourceUrl);
+  } catch {
+    throw new Error("sourceUrl must be a valid http(s) URL.");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("sourceUrl must use http or https.");
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(parsed, { signal: timeoutSignal(IMAGE_DOWNLOAD_TIMEOUT_MS) });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new QuickyPageTimeoutError(
+        `Timed out after ${Math.round(
+          IMAGE_DOWNLOAD_TIMEOUT_MS / 1000,
+        )}s downloading sourceUrl. Try a smaller image or provide a direct hosted image URL.`,
+      );
+    }
+    throw err;
+  }
+
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 500);
+    throw new QuickyPageApiError(
+      detail || `Image download failed with ${res.status}`,
+      res.status,
+    );
+  }
+
+  const length = Number(res.headers.get("content-length") ?? "0");
+  if (Number.isFinite(length) && length > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `sourceUrl image is too large. Max ${Math.floor(
+        MAX_UPLOAD_BYTES / 1024 / 1024,
+      )} MB; use a smaller image.`,
+    );
+  }
+
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  assertImageSize(bytes);
+  return bytes;
+}
+
+async function loadImageBytes(input: {
+  data?: string;
+  filePath?: string;
+  sourceUrl?: string;
+}): Promise<Uint8Array> {
+  const sources = [input.data, input.filePath, input.sourceUrl].filter(
+    (value) => typeof value === "string" && value.trim().length > 0,
+  );
+  if (sources.length !== 1) {
+    throw new Error(
+      "Provide exactly one image source: `data` (base64), `filePath`, or `sourceUrl`.",
+    );
+  }
+  if (input.data?.trim()) {
+    const bytes = decodeBase64Image(input.data);
+    assertImageSize(bytes);
+    return bytes;
+  }
+  if (input.filePath?.trim()) return readImageFile(input.filePath);
+  if (input.sourceUrl?.trim()) return downloadImageUrl(input.sourceUrl);
+  throw new Error("No image source provided.");
+}
+
 async function uploadImageBytes(input: {
   bytes: Uint8Array;
   mimeType: AllowedImageMime;
 }): Promise<PresignedUpload & { publicUrl: string }> {
-  const presigned = await postJson<PresignedUpload>("/api/upload", {
-    mime: input.mimeType,
-    size: input.bytes.byteLength,
-  });
+  const presigned = await postJson<PresignedUpload>(
+    "/api/upload",
+    {
+      mime: input.mimeType,
+      size: input.bytes.byteLength,
+    },
+    API_TIMEOUT_MS,
+  );
 
-  const uploadRes = await fetch(absoluteUrl(presigned.uploadUrl), {
-    method: presigned.method,
-    headers: presigned.headers,
-    body: new Blob([input.bytes], { type: input.mimeType }),
-  });
+  let uploadRes: Response;
+  try {
+    uploadRes = await fetch(absoluteUrl(presigned.uploadUrl), {
+      method: presigned.method,
+      headers: presigned.headers,
+      body: new Blob([input.bytes], { type: input.mimeType }),
+      signal: timeoutSignal(UPLOAD_PUT_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      throw new QuickyPageTimeoutError(
+        `Timed out after ${Math.round(
+          UPLOAD_PUT_TIMEOUT_MS / 1000,
+        )}s uploading image bytes. Try a smaller image or a hosted image URL.`,
+      );
+    }
+    throw err;
+  }
 
   if (!uploadRes.ok) {
     const detail = (await uploadRes.text().catch(() => "")).slice(0, 500);
@@ -383,7 +558,9 @@ async function uploadImageBytes(input: {
 // the call being silently rejected by the MCP transport.
 function errorResult(prefix: string, err: unknown) {
   const message =
-    err instanceof QuickyPageApiError
+    err instanceof QuickyPageTimeoutError
+      ? `${prefix}: ${err.message}`
+      : err instanceof QuickyPageApiError
       ? `${prefix}: ${err.message} (HTTP ${err.status})`
       : `${prefix}: ${err instanceof Error ? err.message : String(err)}`;
   return {
@@ -398,9 +575,8 @@ const server = new McpServer({
 });
 
 // --------------------------------------------------------------------------
-// upload_image — asset ingestion for attached or generated images. Claude
-// passes base64 bytes; Quicky.Page returns a public URL suitable for an image
-// block. The bytes go through the same signed-upload path as the web editor.
+// upload_image — asset ingestion for attached, generated, local, or hosted
+// images. The bytes go through the same signed-upload path as the web editor.
 // --------------------------------------------------------------------------
 
 server.registerTool(
@@ -410,14 +586,30 @@ server.registerTool(
     description: [
       "Upload an attached or AI-generated image to Quicky.Page image hosting and return a public URL plus a ready-to-use qp.v1 image block.",
       "",
-      "Use this before `publish_page` or `update_page` whenever the user wants an attached image or generated image included on the page. Do not put raw base64 image data in page markdown or blocks. Upload the image first, then include the returned `block` in the page's `blocks` array.",
+      "Use this before `publish_page` or `update_page` whenever the user wants an attached, generated, local, or hosted image included on the page. Upload the image first, then include the returned `block` in the page's `blocks` array.",
+      "",
+      "Provide exactly ONE image source: `data` for base64 bytes, `filePath` for a local file readable by this MCP server, or `sourceUrl` for a hosted http(s) image.",
+      "",
+      "Source guidance: In Claude Desktop or other local MCP clients, prefer saving attached/generated images to a local file and pass `filePath`; this avoids large inline JSON-RPC payloads. For hosted images, prefer `sourceUrl`. Use `data` only for very small images because some MCP hosts can hang or fail when passing larger base64 strings as tool arguments.",
       "",
       "Supports PNG, JPEG, WEBP, and GIF up to 7 MB. SVG is intentionally not supported.",
+      "",
+      "If upload times out or the host cannot provide an image source, tell the user the image could not be uploaded and ask them to try a smaller image, a local file path, or a hosted image URL.",
     ].join("\n"),
     inputSchema: {
       data: z
         .string()
-        .describe("Base64-encoded image bytes. A data:image/...;base64,... URL is also accepted."),
+        .optional()
+        .describe("Base64-encoded image bytes. A data:image/...;base64,... URL is also accepted. Best for very small images only; for Claude Desktop/local use prefer filePath, and for hosted images prefer sourceUrl. Provide exactly one of data, filePath, or sourceUrl."),
+      filePath: z
+        .string()
+        .optional()
+        .describe("Local image file path readable by this MCP server. Preferred for Claude Desktop/local clients when the image can be saved to disk. Provide exactly one of data, filePath, or sourceUrl."),
+      sourceUrl: z
+        .string()
+        .url()
+        .optional()
+        .describe("Hosted http(s) image URL to download and re-upload to Quicky.Page. Prefer this over inline base64 when available. Provide exactly one of data, filePath, or sourceUrl."),
       mimeType: allowedImageMimeSchema.describe(
         "Declared image MIME type. Must match the image bytes.",
       ),
@@ -428,22 +620,9 @@ server.registerTool(
         .describe("Optional alt text to include in the returned image block."),
     },
   },
-  async ({ data, mimeType, alt }) => {
+  async ({ data, filePath, sourceUrl, mimeType, alt }) => {
     try {
-      const bytes = decodeBase64Image(data);
-      if (bytes.byteLength > MAX_UPLOAD_BYTES) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Image is too large. Max ${Math.floor(
-                MAX_UPLOAD_BYTES / 1024 / 1024,
-              )} MB.`,
-            },
-          ],
-          isError: true as const,
-        };
-      }
+      const bytes = await loadImageBytes({ data, filePath, sourceUrl });
 
       const sniffed = sniffImageMime(bytes);
       if (sniffed !== mimeType) {

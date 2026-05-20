@@ -11,14 +11,20 @@ This package is published to GitHub and is not published to npm yet. Run it from
 ## Tools
 
 - **`publish_page`** — publish markdown or qp.v1 blocks as a public web page. Returns `{ url, editUrl, id, slug, editKey }`.
-- **`upload_image`** — upload attached or AI-generated image bytes through Quicky.Page's signed upload flow. Returns `{ publicUrl, key, block }`, where `block` is ready for `publish_page` or `update_page`.
+- **`upload_image`** — upload attached, generated, local, or hosted image bytes through Quicky.Page's signed upload flow. Returns `{ publicUrl, key, block }`, where `block` is ready for `publish_page` or `update_page`.
 - **`update_page`** — replace a previously-published page using its `editKey`. Same URL, replaced content.
 - **`rename_page_slug`** — set, change, or clear a premium custom URL slug.
 - **`get_page`** — read the public content of a page by id.
 
 ## Image Workflow
 
-For attached or generated images, call `upload_image` first with base64 image data and a MIME type (`image/png`, `image/jpeg`, `image/webp`, or `image/gif`). Then include the returned `block` in a `blocks` array:
+For attached or generated images, call `upload_image` first with a MIME type (`image/png`, `image/jpeg`, `image/webp`, or `image/gif`) and exactly one image source:
+
+- `data`: base64 bytes or a `data:image/...;base64,...` URL. Best for very small images only; some MCP hosts can hang or fail on larger inline tool arguments.
+- `filePath`: a local file path readable by the MCP server. Preferred for Claude Desktop or other local MCP clients when the image can be saved to disk.
+- `sourceUrl`: a hosted `http(s)` image URL. Preferred when the image is already reachable online.
+
+For Claude Desktop attachments or generated images, ask Claude to save the image locally first and pass `filePath` instead of inline base64. Then include the returned `block` in a `blocks` array:
 
 ```json
 {

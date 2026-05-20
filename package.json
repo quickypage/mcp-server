@@ -1,6 +1,6 @@
 {
   "name": "@quickypage/mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MCP server for Quicky.Page — instant publishing for AI-generated web content, including uploaded images.",
   "keywords": [
     "mcp",
